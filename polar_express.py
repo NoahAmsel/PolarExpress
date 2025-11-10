@@ -5,7 +5,25 @@ import numpy as np
 import torch
 
 
+def optimal_cubic(l, u):
+    """Find an approximation to the constant function x -> 1
+    of the form p(x) = a*x + b*x^3 that minimizes the maximum approximation error over the interval [l, u].
+
+    Returns:
+        a, b: coefficients of the optimal odd cubic approximant.
+    """
+    alpha = sqrt(3/(u**2 + l*u + l**2))
+    beta = 4/(2 + l*u*(l + u)*(alpha**3))
+    return (3/2)*alpha*beta, (-1/2)*(alpha**3)*beta
+
+
 def optimal_quintic(l, u):
+    """Use the simplified Remez algorithm to find an approximation to the constant function x -> 1
+    of the form p(x) = a*x + b*x^3 + c*x^5 that minimizes the maximum approximation error over the interval [l, u].
+
+    Returns:
+        a, b, c: coefficients of the optimal odd quintic approximant.
+    """
     assert 0 <= l <= u
     if 1 - 5e-6 <= l / u:
         # Above this threshold, the equioscillating polynomials 
@@ -27,15 +45,6 @@ def optimal_quintic(l, u):
         q, r = np.sqrt((-3*b + np.array([-1, 1]) * 
                         sqrt(9*b**2 - 20*a*c)) / (10*c))
     return float(a), float(b), float(c)
-
-target_slope = 0
-def obj(l):
-    a, b, c = optimal_quintic(l, 1)
-    total = (a+b+c)
-    a /= total; b /= total; c /= total
-    local_argmin = np.sqrt((-3*b + sqrt(9*b**2 - 20*a*c)) / (10*c))
-    local_min = a*local_argmin + b*local_argmin**3 + c*local_argmin**5
-    return local_min / local_argmin - target_slope
 
 
 def optimal_composition(l, num_iters, safety_factor_eps=0, cushion=0):
