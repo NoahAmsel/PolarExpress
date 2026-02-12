@@ -30,8 +30,8 @@ def optimal_quintic(l, u):
         # is numerically equal to...
         return (15/8)/u, (-10/8)/(u**3), (3/8)/(u**5)
     # This initialization becomes exact as l -> u
-    q = (3*l + 1) / 4
-    r = (l + 3) / 4
+    q = (3*l + u) / 4
+    r = (l + 3*u) / 4
     E, old_E = inf, None
     while not old_E or abs(old_E - E) > 1e-15:
         old_E = E
