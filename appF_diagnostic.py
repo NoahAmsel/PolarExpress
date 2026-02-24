@@ -4,20 +4,8 @@ import pandas as pd
 import torch
 
 
-def symmetric_matmul(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-    out = A @ B
-    return (out + out.mT) / 2  # ensure symmetry
-
-
-def spectrum2matrix(spectrum, aspect_ratio):
-    n = len(spectrum)
-    m = int(n * aspect_ratio)
-    U, _, Vh = torch.linalg.svd(torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype), full_matrices=False)
-    return U @ torch.diag(spectrum) @ Vh
-
-
 class PolarExpressDiagnostic:
-    def __init__(self, coeffs_name: str, steps: int, restarts: list[int], sym_mm_name: str):
+    def __init__(self, coeffs_name: str, steps: int, restarts: list[int], sym_mm_name: str, ambient_dtype=torch.float64):
         self.coeffs = dict(
             ns3=[(1.5, -0.5, 0)],
             ns5=[(15/8, -10/8, 3/8)],
@@ -27,13 +15,11 @@ class PolarExpressDiagnostic:
             repeat(self.coeffs[-1], steps - len(self.coeffs)))
 
         self.restarts = sorted(restarts)
-
-        self.sym_mm = dict(
-            basic=lambda A, B: A @ B,
-            avg=symmetric_matmul,
-        )[sym_mm_name]
-
+        self.sym_mm_name = sym_mm_name
         self.do_diagnostics = True
+
+        self.ambient_dtype = ambient_dtype
+        self.mm_dtype = ambient_dtype  # later we might have multiple types
 
     def __call__(self, G: torch.Tensor) -> torch.Tensor:
         assert G.ndim >= 2
@@ -47,6 +33,7 @@ class PolarExpressDiagnostic:
         if self.do_diagnostics:
             Xorig = X.clone()
             starting_eigvecs, _, starting_right_svs = torch.linalg.svd(Xorig, full_matrices=False)
+        X = X.to(self.ambient_dtype)
         for iter, (a, b, c) in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if (iter in self.restarts) and (iter > 0):
@@ -55,6 +42,7 @@ class PolarExpressDiagnostic:
                 R = self.sym_mm(X, X.mT)  # R = X @ X.mT        
             Z = self.quadratic(R, a, b, c)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
+                X_if_we_stopped_here = self.applyQ(Q, X)
                 diagnostics.append(
                     {
                         f"{name}_{k}": v
@@ -62,9 +50,8 @@ class PolarExpressDiagnostic:
                         for k, v in self.diagnostics(M, starting_eigvecs).items()
                     } | {
                         f"X_{k}": v
-                        for k, v in self.X_diagnostics(X, starting_eigvecs, starting_right_svs).items()
-                    }
-                    | self.polar_accuracy_metrics(Xorig, X)
+                        for k, v in self.X_diagnostics(X_if_we_stopped_here, starting_eigvecs, starting_right_svs).items()
+                    } | self.polar_accuracy_metrics(Xorig, X_if_we_stopped_here)
                 )
             Q = self.sym_mm(Q, Z)  # Q = Q Z
             R = self.sym_mm(Z.T, self.sym_mm(R, Z))
@@ -73,23 +60,30 @@ class PolarExpressDiagnostic:
             diagnostics.append(
                 {
                     f"{name}_{k}": v
-                    for name, M in (
-                        ("R", R),
-                        ("Z", Z),
-                        ("Q", Q),
-                    )  # R doesn't matter and Z hasn't changed but whatever
+                    for name, M in (("R", R), ("Z", Z), ("Q", Q),)  # R doesn't matter and Z hasn't changed but whatever
                     for k, v in self.diagnostics(M, starting_eigvecs).items()
-                }
-                | {
+                } | {
                     f"X_{k}": v
                     for k, v in self.X_diagnostics(X, starting_eigvecs, starting_right_svs).items()
-                }
-                | self.polar_accuracy_metrics(Xorig, X)
+                } | self.polar_accuracy_metrics(Xorig, X)
             )
         return X, diagnostics
 
+    def sym_mm(self, A, B):
+        A = A.to(dtype=self.mm_dtype)
+        B = B.to(dtype=self.mm_dtype)
+        if self.sym_mm_name == "basic":
+            return (A @ B).to(dtype=self.ambient_dtype)
+        elif self.sym_mm_name == "avg":
+            out = A @ B
+            return ((out + out.mT) / 2).to(dtype=self.ambient_dtype)
+        else:
+            raise ValueError(f"Unknown sym_mm_name: {self.sym_mm_name}")
+
     def applyQ(self, Q, X):
-        return Q @ X
+        Q = Q.to(dtype=self.mm_dtype)
+        X = X.to(dtype=self.mm_dtype)
+        return (Q @ X).to(dtype=self.ambient_dtype)
 
     def quadratic(self, M, a, b, c):
         I = torch.eye(M.shape[-2], device=M.device, dtype=M.dtype)
@@ -98,10 +92,14 @@ class PolarExpressDiagnostic:
     @staticmethod
     def diagnostics(M, starting_eigvecs):
         M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
-        assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
-        # M = (M + M.mT) / 2
-        eigvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
-        eigvals_from_starting_vecs = torch.diag(starting_eigvecs.mT @ M @ starting_eigvecs)
+        # assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
+        M = (M + M.mT) / 2
+        if not M.isfinite().all():
+            eigvals = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+            eigvals_from_starting_vecs = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+        else:
+            eigvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
+            eigvals_from_starting_vecs = torch.diag(starting_eigvecs.mT @ M @ starting_eigvecs)
         return dict(
             eigvals=eigvals.cpu().numpy(),
             min_eigval=eigvals.min().item(),
@@ -115,8 +113,12 @@ class PolarExpressDiagnostic:
     @staticmethod
     def X_diagnostics(M, starting_left_singular_vecs, starting_right_singular_vecs):
         M = M.to(dtype=torch.float64)
-        singvals = torch.linalg.svdvals(M)
-        singvals_from_starting_svs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
+        if not M.isfinite().all():
+            singvals = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+            singvals_from_starting_svs = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+        else:
+            singvals = torch.linalg.svdvals(M)
+            singvals_from_starting_svs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
         return dict(
             eigvals=singvals.cpu().numpy(),
             min_eigval=singvals.min().item(),
@@ -168,6 +170,13 @@ class PolarExpressDiagnostic:
     PE_coeffs_list = [
         (a / 1.01, b / 1.01**3, c / 1.01**5) for (a, b, c) in PE_coeffs_list[:-1]
     ] + [PE_coeffs_list[-1]]
+
+
+def spectrum2matrix(spectrum, aspect_ratio):
+    n = len(spectrum)
+    m = int(n * aspect_ratio)
+    U, _, Vh = torch.linalg.svd(torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype), full_matrices=False)
+    return U @ torch.diag(spectrum) @ Vh
 
 
 if __name__ == "__main__":
