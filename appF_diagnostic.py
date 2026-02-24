@@ -5,7 +5,7 @@ import torch
 
 
 class PolarExpressDiagnostic:
-    def __init__(self, coeffs_name: str, steps: int, restarts: list[int], sym_mm_name: str, ambient_dtype=torch.float64):
+    def __init__(self, coeffs_name: str, steps: int, restarts: list[int], sym_mm_name: str, ambient_dtype=torch.float64, do_diagnostics=True):
         self.coeffs = dict(
             ns3=[(1.5, -0.5, 0)],
             ns5=[(15/8, -10/8, 3/8)],
@@ -16,7 +16,7 @@ class PolarExpressDiagnostic:
 
         self.restarts = sorted(restarts)
         self.sym_mm_name = sym_mm_name
-        self.do_diagnostics = True
+        self.do_diagnostics = do_diagnostics
 
         self.ambient_dtype = ambient_dtype
         self.mm_dtype = ambient_dtype  # later we might have multiple types
@@ -33,6 +33,7 @@ class PolarExpressDiagnostic:
         if self.do_diagnostics:
             Xorig = X.clone()
             starting_eigvecs, _, starting_right_svs = torch.linalg.svd(Xorig, full_matrices=False)
+            starting_right_svs = starting_right_svs.mT  # svd returns V^T, not V
         X = X.to(self.ambient_dtype)
         for iter, (a, b, c) in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
@@ -95,8 +96,8 @@ class PolarExpressDiagnostic:
         # assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
         M = (M + M.mT) / 2
         if not M.isfinite().all():
-            eigvals = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
-            eigvals_from_starting_vecs = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+            eigvals = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
+            eigvals_from_starting_vecs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
         else:
             eigvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
             eigvals_from_starting_vecs = torch.diag(starting_eigvecs.mT @ M @ starting_eigvecs)
@@ -112,10 +113,10 @@ class PolarExpressDiagnostic:
 
     @staticmethod
     def X_diagnostics(M, starting_left_singular_vecs, starting_right_singular_vecs):
-        M = M.to(dtype=torch.float64)
+        M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
         if not M.isfinite().all():
-            singvals = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
-            singvals_from_starting_svs = torch.full((M.shape[-1],), float('nan'), device=M.device, dtype=M.dtype)
+            singvals = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
+            singvals_from_starting_svs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
         else:
             singvals = torch.linalg.svdvals(M)
             singvals_from_starting_svs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
@@ -173,8 +174,8 @@ class PolarExpressDiagnostic:
 
 
 def spectrum2matrix(spectrum, aspect_ratio):
-    n = len(spectrum)
-    m = int(n * aspect_ratio)
+    n = int(len(spectrum) * aspect_ratio)
+    m = len(spectrum)
     U, _, Vh = torch.linalg.svd(torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype), full_matrices=False)
     return U @ torch.diag(spectrum) @ Vh
 
