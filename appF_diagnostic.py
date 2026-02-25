@@ -11,7 +11,7 @@ class PolarExpressDiagnostic:
         coeffs_name: str,
         steps: int,
         restarts: list[int],
-        sym_mm_name: str,
+        force_symmetry: bool,
         ambient_dtype=torch.float64,
         xxt_dtype=None,
         xxt_posthoc_dtype=None,
@@ -19,7 +19,7 @@ class PolarExpressDiagnostic:
         do_diagnostics=True,
     ):
         self.coeffs = dict(
-            ns3=[(1.5, -0.5, 0)],
+            ns3=[(1.5, -0.5)],
             ns5=[(15/8, -10/8, 3/8)],
             polar5=self.PE_coeffs_list,
         )[coeffs_name]
@@ -27,7 +27,7 @@ class PolarExpressDiagnostic:
             repeat(self.coeffs[-1], steps - len(self.coeffs)))
 
         self.restarts = sorted(restarts)
-        self.sym_mm_name = sym_mm_name
+        self.force_symmetry = force_symmetry
         self.do_diagnostics = do_diagnostics
 
         self.ambient_dtype = ambient_dtype
@@ -47,104 +47,89 @@ class PolarExpressDiagnostic:
         diagnostics = []
         if self.do_diagnostics:
             Xorig = X.clone()
-            starting_eigvecs, _, starting_right_svs = torch.linalg.svd(Xorig, full_matrices=False)
+            starting_left_svs, _, starting_right_svs = torch.linalg.svd(Xorig, full_matrices=False)
             starting_right_svs = starting_right_svs.mT  # svd returns V^T, not V
         X = X.to(self.ambient_dtype)
-        for iter, (a, b, c) in enumerate(self.coeffs):
+        for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if (iter in self.restarts) and (iter > 0):
-                    X = self.sym_mm(Q, X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
+                    X = self.mm(Q, X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
                 R = self.sym_mm(X, X.mT, dtype=self.xxt_dtype).to(dtype=self.xxt_posthoc_dtype).to(dtype=self.ambient_dtype)  # R = X @ X.mT
                 # TODO: record eigenvectors of XXT at iter 0 to use for diagonalizing inside diagnostics
-            Z = self.quadratic(R, a, b, c)  # Z = aI + bR + cR^2
+            Z = self.polynomial(R, coeff)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
-                X_if_we_stopped_here = self.applyQ(Q, X)
+                X_if_we_stopped_here = self.mm(Q, X, dtype=self.qx_dtype)
                 diagnostics.append(
                     {
                         f"{name}_{k}": v
                         for name, M in (("R", R), ("Z", Z), ("Q", Q),)
-                        for k, v in self.diagnostics(M, starting_eigvecs).items()
+                        for k, v in self.diagnostics(M, starting_left_svs, symmetric=True).items()
                     } | {
                         f"X_{k}": v
-                        for k, v in self.X_diagnostics(X_if_we_stopped_here, starting_eigvecs, starting_right_svs).items()
+                        for k, v in self.diagnostics(X_if_we_stopped_here, starting_left_svs, starting_right_svs).items()
                     } | self.polar_accuracy_metrics(Xorig, X_if_we_stopped_here)
                 )
-            Q = self.sym_mm(Q, Z)  # Q = Q Z
-            R = self.sym_mm(Z.T, self.sym_mm(R, Z))
-        X = self.sym_mm(Q, X, dtype=self.qx_dtype)
+            Q = self.mm(Q, Z)  # Q = Q Z
+            R = self.sym_mm(Z.T, self.sym_mm(R, Z))  # R = Z.T @ R @ Z
+        X = self.mm(Q, X, dtype=self.qx_dtype)
         if self.do_diagnostics:
             diagnostics.append(
                 {
                     f"{name}_{k}": v
                     for name, M in (("R", R), ("Z", Z), ("Q", Q),)  # R doesn't matter and Z hasn't changed but whatever
-                    for k, v in self.diagnostics(M, starting_eigvecs).items()
+                    for k, v in self.diagnostics(M, starting_left_svs, symmetric=True).items()
                 } | {
                     f"X_{k}": v
-                    for k, v in self.X_diagnostics(X, starting_eigvecs, starting_right_svs).items()
+                    for k, v in self.diagnostics(X, starting_left_svs, starting_right_svs).items()
                 } | self.polar_accuracy_metrics(Xorig, X)
             )
         return X, diagnostics
 
-    def sym_mm(self, A, B, dtype=None):
+    def mm(self, A, B, symmetrize=False, dtype=None):
         if dtype is None: dtype = self.mm_dtype
         A = A.to(dtype=dtype)
         B = B.to(dtype=dtype)
-        if self.sym_mm_name == "basic":
-            return (A @ B).to(dtype=self.ambient_dtype)
-        elif self.sym_mm_name == "avg":
-            out = (A @ B).to(dtype=self.ambient_dtype)
-            return (out + out.mT) / 2
-        else:
-            raise ValueError(f"Unknown sym_mm_name: {self.sym_mm_name}")
+        out = (A @ B).to(dtype=self.ambient_dtype)
+        return ((out + out.mT) / 2) if symmetrize else out
 
-    # TODO: support arbitrary polynomial
-    def quadratic(self, M, a, b, c):
+    def sym_mm(self, A, B, dtype=None):
+        return self.mm(A, B, symmetrize=self.force_symmetry, dtype=dtype)
+
+    def polynomial(self, M, coeff):
         I = torch.eye(M.shape[-2], device=M.device, dtype=M.dtype)
-        return a * I + b * M + c * self.sym_mm(M, M.mT)
+        out = coeff[-1] * I
+        for c in reversed(coeff[:-1]):
+            out = c * I + self.sym_mm(M, out.mT)
+        return out
 
     @staticmethod
-    def diagnostics(M, starting_eigvecs):
-        M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
-        # assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
-        M = (M + M.mT) / 2
-        if not M.isfinite().all():
-            eigvals = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
-            eigvals_from_starting_vecs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
-        else:
-            eigvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
-            Lambda = starting_eigvecs.mT @ M @ starting_eigvecs
-            eigvals_from_starting_vecs = torch.diag(Lambda)
-            diagonalizability_error = torch.linalg.matrix_norm(M - Lambda, ord='fro') / torch.linalg.matrix_norm(M, ord='fro')
-        return dict(
-            min_eigval_from_starting_vecs=eigvals_from_starting_vecs.min().item(),
-            max_eigval_from_starting_vecs=eigvals_from_starting_vecs.max().item(),
-            min_eigval=eigvals.min().item(),
-            max_eigval=eigvals.max().item(),
-            diagonalizability=diagonalizability_error.item(),
-            largest_entry=torch.linalg.vector_norm(M, ord=float('inf')).item(),
-            eigvals=eigvals.cpu().numpy(),
-            diagonalizability=diagonalizability_error.item(),
-        )
-
-    # TODO: fold this into previous method
-    @staticmethod
-    def X_diagnostics(M, starting_left_singular_vecs, starting_right_singular_vecs):
+    def diagnostics(M, starting_left_singular_vecs, starting_right_singular_vecs=None, symmetric=False):
+        assert (symmetric and starting_right_singular_vecs is None) or (not symmetric and starting_right_singular_vecs is not None), "Must specify either symmetric or right singular vecs, but not both"
         M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
         if not M.isfinite().all():
             singvals = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
-            singvals_from_starting_svs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
+            singvals_from_starting_vecs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
+        elif symmetric:
+            # assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
+            M = (M + M.mT) / 2
+            singvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
+            singvals_from_starting_vecs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_left_singular_vecs)
         else:
             singvals = torch.linalg.svdvals(M)
-            singvals_from_starting_svs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
+            singvals_from_starting_vecs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
+        diag = torch.zeros_like(M)
+        diag[range(len(singvals_from_starting_vecs)), range(len(singvals_from_starting_vecs))] = singvals_from_starting_vecs
+        diagonalizability_error = torch.linalg.matrix_norm(M - diag, ord='fro') / torch.linalg.matrix_norm(M, ord='fro')
         return dict(
-            eigvals=singvals.cpu().numpy(),
-            min_eigval=singvals.min().item(),
-            max_eigval=singvals.max().item(),
-            eigvals_from_starting_vecs=singvals_from_starting_svs.cpu().numpy(),
-            min_eigval_from_starting_vecs=singvals_from_starting_svs.min().item(),
-            max_eigval_from_starting_vecs=singvals_from_starting_svs.max().item(),
+            min_singval_from_starting_vecs=singvals_from_starting_vecs.min().item(),
+            max_singval_from_starting_vecs=singvals_from_starting_vecs.max().item(),
+            min_singval=singvals.min().item(),
+            max_singval=singvals.max().item(),
+            diagonalizability=diagonalizability_error.item(),
             largest_entry=torch.linalg.vector_norm(M, ord=float('inf')).item(),
+            singvals_from_starting_vecs=singvals_from_starting_vecs.cpu().numpy(),
+            singvals=singvals.cpu().numpy(),
         )
 
     @staticmethod
