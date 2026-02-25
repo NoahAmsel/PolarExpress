@@ -5,7 +5,19 @@ import torch
 
 
 class PolarExpressDiagnostic:
-    def __init__(self, coeffs_name: str, steps: int, restarts: list[int], sym_mm_name: str, ambient_dtype=torch.float64, do_diagnostics=True):
+
+    def __init__(
+        self,
+        coeffs_name: str,
+        steps: int,
+        restarts: list[int],
+        sym_mm_name: str,
+        ambient_dtype=torch.float64,
+        xxt_dtype=None,
+        xxt_posthoc_dtype=None,
+        qx_dtype=None,
+        do_diagnostics=True,
+    ):
         self.coeffs = dict(
             ns3=[(1.5, -0.5, 0)],
             ns5=[(15/8, -10/8, 3/8)],
@@ -19,7 +31,10 @@ class PolarExpressDiagnostic:
         self.do_diagnostics = do_diagnostics
 
         self.ambient_dtype = ambient_dtype
-        self.mm_dtype = ambient_dtype  # later we might have multiple types
+        self.mm_dtype = ambient_dtype
+        self.xxt_dtype = self.mm_dtype if xxt_dtype is None else xxt_dtype
+        self.xxt_posthoc_dtype = self.ambient_dtype if xxt_posthoc_dtype is None else xxt_posthoc_dtype
+        self.qx_dtype = self.mm_dtype if qx_dtype is None else qx_dtype
 
     def __call__(self, G: torch.Tensor) -> torch.Tensor:
         assert G.ndim >= 2
@@ -38,9 +53,10 @@ class PolarExpressDiagnostic:
         for iter, (a, b, c) in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if (iter in self.restarts) and (iter > 0):
-                    X = self.applyQ(Q, X)
+                    X = self.sym_mm(Q, X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
-                R = self.sym_mm(X, X.mT)  # R = X @ X.mT        
+                R = self.sym_mm(X, X.mT, dtype=self.xxt_dtype).to(dtype=self.xxt_posthoc_dtype).to(dtype=self.ambient_dtype)  # R = X @ X.mT
+                # TODO: record eigenvectors of XXT at iter 0 to use for diagonalizing inside diagnostics
             Z = self.quadratic(R, a, b, c)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
                 X_if_we_stopped_here = self.applyQ(Q, X)
@@ -56,7 +72,7 @@ class PolarExpressDiagnostic:
                 )
             Q = self.sym_mm(Q, Z)  # Q = Q Z
             R = self.sym_mm(Z.T, self.sym_mm(R, Z))
-        X = self.applyQ(Q, X)
+        X = self.sym_mm(Q, X, dtype=self.qx_dtype)
         if self.do_diagnostics:
             diagnostics.append(
                 {
@@ -70,22 +86,19 @@ class PolarExpressDiagnostic:
             )
         return X, diagnostics
 
-    def sym_mm(self, A, B):
-        A = A.to(dtype=self.mm_dtype)
-        B = B.to(dtype=self.mm_dtype)
+    def sym_mm(self, A, B, dtype=None):
+        if dtype is None: dtype = self.mm_dtype
+        A = A.to(dtype=dtype)
+        B = B.to(dtype=dtype)
         if self.sym_mm_name == "basic":
             return (A @ B).to(dtype=self.ambient_dtype)
         elif self.sym_mm_name == "avg":
-            out = A @ B
-            return ((out + out.mT) / 2).to(dtype=self.ambient_dtype)
+            out = (A @ B).to(dtype=self.ambient_dtype)
+            return (out + out.mT) / 2
         else:
             raise ValueError(f"Unknown sym_mm_name: {self.sym_mm_name}")
 
-    def applyQ(self, Q, X):
-        Q = Q.to(dtype=self.mm_dtype)
-        X = X.to(dtype=self.mm_dtype)
-        return (Q @ X).to(dtype=self.ambient_dtype)
-
+    # TODO: support arbitrary polynomial
     def quadratic(self, M, a, b, c):
         I = torch.eye(M.shape[-2], device=M.device, dtype=M.dtype)
         return a * I + b * M + c * self.sym_mm(M, M.mT)
@@ -100,17 +113,21 @@ class PolarExpressDiagnostic:
             eigvals_from_starting_vecs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
         else:
             eigvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
-            eigvals_from_starting_vecs = torch.diag(starting_eigvecs.mT @ M @ starting_eigvecs)
+            Lambda = starting_eigvecs.mT @ M @ starting_eigvecs
+            eigvals_from_starting_vecs = torch.diag(Lambda)
+            diagonalizability_error = torch.linalg.matrix_norm(M - Lambda, ord='fro') / torch.linalg.matrix_norm(M, ord='fro')
         return dict(
-            eigvals=eigvals.cpu().numpy(),
-            min_eigval=eigvals.min().item(),
-            max_eigval=eigvals.max().item(),
-            eigvals_from_starting_vecs=eigvals_from_starting_vecs.cpu().numpy(),
             min_eigval_from_starting_vecs=eigvals_from_starting_vecs.min().item(),
             max_eigval_from_starting_vecs=eigvals_from_starting_vecs.max().item(),
+            min_eigval=eigvals.min().item(),
+            max_eigval=eigvals.max().item(),
+            diagonalizability=diagonalizability_error.item(),
             largest_entry=torch.linalg.vector_norm(M, ord=float('inf')).item(),
+            eigvals=eigvals.cpu().numpy(),
+            diagonalizability=diagonalizability_error.item(),
         )
 
+    # TODO: fold this into previous method
     @staticmethod
     def X_diagnostics(M, starting_left_singular_vecs, starting_right_singular_vecs):
         M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
