@@ -1,5 +1,8 @@
 from itertools import repeat
 
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from IPython.display import HTML
 import pandas as pd
 import torch
 
@@ -10,8 +13,8 @@ class PolarExpressDiagnostic:
         self,
         coeffs_name: str,
         steps: int,
-        restarts: list[int],
-        force_symmetry: bool,
+        restarts: list[int] = [],
+        force_symmetry: bool = True,
         ambient_dtype=torch.float64,
         xxt_dtype=None,
         xxt_posthoc_dtype=None,
@@ -84,7 +87,23 @@ class PolarExpressDiagnostic:
                     for k, v in self.diagnostics(X, starting_left_svs, starting_right_svs).items()
                 } | self.polar_accuracy_metrics(Xorig, X)
             )
-        return X, diagnostics
+        return X, pd.DataFrame(diagnostics)
+
+    def track_eigvals(self, eigvals):
+        rs = []
+        qs = []
+        for iter, coeff in enumerate(self.coeffs):
+            if (iter == 0) or (iter in self.restarts):
+                q = torch.ones_like(eigvals)
+                r = eigvals.clone()
+            z = coeff[-1] * torch.ones_like(r)
+            for c in reversed(coeff[:-1]):
+                z = c + r * z
+            rs.append(r.clone()); qs.append(q.clone())
+            q *= z
+            r *= z**2
+        rs.append(r.clone()); qs.append(q.clone())
+        return rs, qs
 
     def mm(self, A, B, symmetrize=False, dtype=None):
         if dtype is None: dtype = self.mm_dtype
@@ -180,6 +199,31 @@ def spectrum2matrix(spectrum, aspect_ratio):
     m = len(spectrum)
     U, _, Vh = torch.linalg.svd(torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype), full_matrices=False)
     return U @ torch.diag(spectrum) @ Vh
+
+
+def spectrum_evolution_plot(df, yscale='linear', **yscale_kw):
+    init_spectrum = df.loc[0, 'X_singvals_from_starting_vecs']
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    columns = ['R_singvals_from_starting_vecs', 'Q_singvals_from_starting_vecs', 'X_singvals_from_starting_vecs']
+    # columns = ['R_singvals', 'Q_singvals', 'X_singvals']
+    titles = ['R eigenvalues', 'Q eigenvalues', 'X singular values']
+
+    def update(frame):
+        for ax, col, title in zip(axes, columns, titles):
+            vals = df[col].iloc[frame]
+            ax.plot(init_spectrum, vals, label=f'Step {frame}')
+            ax.set_title(f'{title} (Steps 0 – {frame})')
+            ax.set_xlabel('X_0 singular values')
+            ax.set_yscale(yscale, **yscale_kw)
+            ax.legend(loc='upper right', fontsize='small')
+            current_lower, current_upper = ax.get_ylim()
+            ax.set_ylim(min(current_lower, float(vals.min())/1.1, 0),
+                        max(current_upper, float(vals.max())*1.1, 1))
+
+    ani = FuncAnimation(fig, update, frames=len(df), init_func=lambda: None, interval=500, repeat=False)
+    plt.close(fig)
+    return ani
 
 
 if __name__ == "__main__":
