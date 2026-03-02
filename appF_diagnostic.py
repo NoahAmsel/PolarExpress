@@ -103,10 +103,10 @@ class PolarExpressDiagnostic:
             z = coeff[-1] * torch.ones_like(r)
             for c in reversed(coeff[:-1]):
                 z = c + r * z
-            rs.append(r.clone()); qs.append(q.clone())
+            rs.append(r.clone().clone().cpu().numpy()); qs.append(q.clone().cpu().numpy())
             q *= z
             r *= z**2
-        rs.append(r.clone()); qs.append(q.clone())
+        rs.append(r.clone().cpu().numpy()); qs.append(q.clone().cpu().numpy())
         return rs, qs
 
     def mm(self, A, B, symmetrize=False, dtype=None):
@@ -194,7 +194,7 @@ class PolarExpressDiagnostic:
     ]
     # safety factor for numerical stability (but exclude last polynomial)
     PE_coeffs_list = [
-        (a / 1.01, b / 1.01**3, c / 1.01**5) for (a, b, c) in PE_coeffs_list[:-1]
+        (a / 1.02, b / 1.02**3, c / 1.02**5) for (a, b, c) in PE_coeffs_list[:-1]
     ] + [PE_coeffs_list[-1]]
 
 
