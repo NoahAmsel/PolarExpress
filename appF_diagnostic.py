@@ -1,8 +1,9 @@
 from itertools import repeat
 
+from IPython.display import HTML
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from IPython.display import HTML
+import numpy as np
 import pandas as pd
 import torch
 
@@ -13,17 +14,18 @@ class PolarExpressDiagnostic:
         self,
         coeffs_name: str,
         steps: int,
+        ambient_dtype,
         restarts: list[int] = [],
-        force_symmetry: bool = True,
-        ambient_dtype=torch.float64,
+        force_symmetry: bool = True,  # Our CUDA kernels actually do enforce symmetry.
         xxt_dtype=None,
         xxt_posthoc_dtype=None,
+        qT_posthoc_dtype=None,
         qx_dtype=None,
         do_diagnostics=True,
     ):
         self.coeffs = dict(
             ns3=[(1.5, -0.5)],
-            ns5=[(15/8, -10/8, 3/8)],
+            ns5=[((15/8) / 1.02, (-10/8) / (1.02**3), (3/8) / (1.02**5))],
             polar5=self.PE_coeffs_list,
         )[coeffs_name]
         self.coeffs = self.coeffs[:steps] + list( 
@@ -38,6 +40,7 @@ class PolarExpressDiagnostic:
         self.xxt_dtype = self.mm_dtype if xxt_dtype is None else xxt_dtype
         self.xxt_posthoc_dtype = self.ambient_dtype if xxt_posthoc_dtype is None else xxt_posthoc_dtype
         self.qx_dtype = self.mm_dtype if qx_dtype is None else qx_dtype
+        self.qT_posthoc_dtype = self.ambient_dtype if qT_posthoc_dtype is None else qT_posthoc_dtype
 
     def __call__(self, G: torch.Tensor) -> torch.Tensor:
         assert G.ndim >= 2
@@ -60,7 +63,7 @@ class PolarExpressDiagnostic:
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
                 R = self.sym_mm(X, X.mT, dtype=self.xxt_dtype).to(dtype=self.xxt_posthoc_dtype).to(dtype=self.ambient_dtype)  # R = X @ X.mT
                 # TODO: record eigenvectors of XXT at iter 0 to use for diagonalizing inside diagnostics
-            Z = self.polynomial(R, coeff)  # Z = aI + bR + cR^2
+            Z = self.sym_polynomial(R, coeff)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
                 X_if_we_stopped_here = self.mm(Q, X, dtype=self.qx_dtype)
                 diagnostics.append(
@@ -75,6 +78,7 @@ class PolarExpressDiagnostic:
                 )
             Q = self.mm(Q, Z)  # Q = Q Z
             R = self.sym_mm(Z.T, self.sym_mm(R, Z))  # R = Z.T @ R @ Z
+        Q = Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype)
         X = self.mm(Q, X, dtype=self.qx_dtype)
         if self.do_diagnostics:
             diagnostics.append(
@@ -115,7 +119,7 @@ class PolarExpressDiagnostic:
     def sym_mm(self, A, B, dtype=None):
         return self.mm(A, B, symmetrize=self.force_symmetry, dtype=dtype)
 
-    def polynomial(self, M, coeff):
+    def sym_polynomial(self, M, coeff):
         I = torch.eye(M.shape[-2], device=M.device, dtype=M.dtype)
         out = coeff[-1] * I
         for c in reversed(coeff[:-1]):
@@ -127,19 +131,19 @@ class PolarExpressDiagnostic:
         assert (symmetric and starting_right_singular_vecs is None) or (not symmetric and starting_right_singular_vecs is not None), "Must specify either symmetric or right singular vecs, but not both"
         M = M.to(dtype=torch.float64)  # ensure diagnostics are in high precision
         if not M.isfinite().all():
+            hopefully_diagonalized = torch.full_like(M, float('nan'))
             singvals = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
-            singvals_from_starting_vecs = torch.full((min(M.shape[-2:]),), float('nan'), device=M.device, dtype=M.dtype)
         elif symmetric:
+            hopefully_diagonalized = starting_left_singular_vecs.mT @ M @ starting_left_singular_vecs
             # assert (M == M.mT).all(), "Matrix must be symmetric for diagnostics"
             M = (M + M.mT) / 2
             singvals = torch.flip(torch.linalg.eigvalsh(M), dims=(-1,))  # flip because other functions return in decreasing order
-            singvals_from_starting_vecs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_left_singular_vecs)
         else:
+            hopefully_diagonalized = starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs
             singvals = torch.linalg.svdvals(M)
-            singvals_from_starting_vecs = torch.diag(starting_left_singular_vecs.mT @ M @ starting_right_singular_vecs)
-        diag = torch.zeros_like(M)
-        diag[range(len(singvals_from_starting_vecs)), range(len(singvals_from_starting_vecs))] = singvals_from_starting_vecs
-        diagonalizability_error = torch.linalg.matrix_norm(M - diag, ord='fro') / torch.linalg.matrix_norm(M, ord='fro')
+        singvals_from_starting_vecs = torch.diag(hopefully_diagonalized)
+        diagonalizability_residual = hopefully_diagonalized.clone().fill_diagonal_(0)
+        diagonalizability_error = torch.linalg.matrix_norm(diagonalizability_residual, ord='fro') / torch.linalg.matrix_norm(hopefully_diagonalized, ord='fro')
         return dict(
             min_singval_from_starting_vecs=singvals_from_starting_vecs.min().item(),
             max_singval_from_starting_vecs=singvals_from_starting_vecs.max().item(),
@@ -201,27 +205,47 @@ def spectrum2matrix(spectrum, aspect_ratio):
     return U @ torch.diag(spectrum) @ Vh
 
 
-def spectrum_evolution_plot(df, yscale='linear', **yscale_kw):
+def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
     init_spectrum = df.loc[0, 'X_singvals_from_starting_vecs']
+    if frames is None: frames = df.index.tolist()
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    columns = ['R_singvals_from_starting_vecs', 'Q_singvals_from_starting_vecs', 'X_singvals_from_starting_vecs']
-    # columns = ['R_singvals', 'Q_singvals', 'X_singvals']
-    titles = ['R eigenvalues', 'Q eigenvalues', 'X singular values']
+    # since Z and Q are decreasing functions of the corresponding singular value of X_0, flip them for plotting purposes
+    df['Z_singvals'] = df['Z_singvals'].apply(np.sort)
+    df['Q_singvals'] = df['Q_singvals'].apply(np.sort)
+
+    colname_suffix = "singvals_from_starting_vecs"
+    # colname_suffix = "singvals"  # ONLY use this when the underlying polynomials are monotonic, like newton schulz. Otherwise the eigenvalues won't match those of X.
+    title2col = {
+        'R eigenvalues': f'R_{colname_suffix}',
+        # 'Z eigenvalues': f'Z_{colname_suffix}',
+        'Q eigenvalues': f'Q_{colname_suffix}',
+        'X singular values': f'X_{colname_suffix}',
+        # 'X max singular value': f'X_max_singval',
+    }
+
+    fig, axes = plt.subplots(1, len(title2col), figsize=(15, 4))
 
     def update(frame):
-        for ax, col, title in zip(axes, columns, titles):
-            vals = df[col].iloc[frame]
-            ax.plot(init_spectrum, vals, label=f'Step {frame}')
-            ax.set_title(f'{title} (Steps 0 – {frame})')
-            ax.set_xlabel('X_0 singular values')
-            ax.set_yscale(yscale, **yscale_kw)
-            ax.legend(loc='upper right', fontsize='small')
-            current_lower, current_upper = ax.get_ylim()
-            ax.set_ylim(min(current_lower, float(vals.min())/1.1, 0),
-                        max(current_upper, float(vals.max())*1.1, 1))
+        for ax, (title, col) in zip(axes, title2col.items()):
+            if pd.api.types.is_numeric_dtype(df[col]):
+                ax.plot(df.loc[:frame, col], marker='o')
+                ax.set_title(title)
+                ax.set_xlabel('Step (t)')
+                ax.set_yscale(yscale, **yscale_kw)
+            else:
+                vals = df.loc[frame, col]
+                ax.plot(init_spectrum, vals, label=f'Step {frame}')
+                ax.set_title(f'{title} (Steps 0 – {frame})')
+                ax.set_xlabel('X_0 singular values')
+                ax.set_yscale(yscale, **yscale_kw)
+                ax.legend(loc='upper right', fontsize='small')
+                current_lower, current_upper = ax.get_ylim()
+                ax.set_ylim(
+                    min(current_lower, float(vals.min())/1.1, 0),
+                    max(current_upper, float(vals.max())*1.1, 1)
+                )
 
-    ani = FuncAnimation(fig, update, frames=len(df), init_func=lambda: None, interval=500, repeat=False)
+    ani = FuncAnimation(fig, update, frames=frames, init_func=lambda: None, interval=500, repeat=False)
     plt.close(fig)
     return ani
 
@@ -242,3 +266,34 @@ if __name__ == "__main__":
     _, diagnostics = PE(G)
     df = pd.DataFrame(diagnostics)
     print(df.head())
+
+
+# NOTE TO SELF:
+# I tried to show that loss of precision could also be due to eigenvalue drift, but I didn't succeed.
+# The only way I could get significant eigenvalue drift was when there were large negative eigenvalues.
+if False:
+    # ### Eigenvector Drift
+    # Even in the absence of spurious negative eigenvalues, the algorithm may still be unstable due to eigenvector drift.
+    # So far, we have analyzed Gram Newton Schulz solely in terms of its effect on the eigenvalues of the matrices.
+    # This is because, in exact arithmetic, the eigenvectors of any $R_t, Q_t$ or $Z_t$ are all identical — they are the left singular vectors of the input $G$.
+    # Let $G = U \\Sigma V^\top$ be the singular value decomposition, and then $Q_T = U \Lambda_T U^\top$, where $\lim_{T \to \infty} \Lambda_T = \\Sigma^{-1}$.
+    # Therefore, when we multiply $Q_T G$ in the final step, we expect $U^\top U$ to cancel, leaving
+    # $$Q_T \cdot G = U\Lambda_T U^\top \cdot U \\Sigma V^\top = U \Lambda_T \\Sigma V^\top \to U \\Sigma^{-1} \\Sigma V^\top = U V^\top =: \mathrm{polar}(G)$$
+    # as desired.
+    # However, in floating point arithmetic, the eigenvectors of $Q_T$ will not match $U$, since each matrix operation performed by the algorithm causes the eigenvectors to drift slightly.
+    # To demonstrate this drift, we can measure how far $Q_T$ is from the nearest matrix of the form $UDU^\top$ for some diagonal matrix $D$.
+
+    _, well_conditioned_diagnostics = PolarExpressDiagnostic(
+        coeffs_name="ns5",
+        steps=30,
+        ambient_dtype=torch.float16,
+        xxt_dtype=torch.float64,
+    )(spectrum2matrix(torch.logspace(-0.01, -3, steps=n, dtype=torch.float64, device=DEVICE), aspect_ratio))
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for col, title in zip(['Q_diagonalizability'], ['Q_t']):
+        ax.plot(well_conditioned_diagnostics[col], marker='o')
+        ax.set_xlabel('Step (t)')
+    ax.set_title("Relative distance from\nQ_t to nearest UDU^T");
+
+    HTML(spectrum_evolution_plot(well_conditioned_diagnostics, frames=list(range(0, 30, 5))).to_jshtml())
