@@ -242,35 +242,32 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
     colname_suffix = "singvals_from_starting_vecs"
     # colname_suffix = "singvals"  # ONLY use this when the underlying polynomials are monotonic, like newton schulz, and there is no blowup that causes non-monotonicity. Otherwise the eigenvalues won't match those of X.
     title2col = {
-        'R eigenvalues': f'R_{colname_suffix}',
+        '$R_t$ eigenvalues': f'R_{colname_suffix}',
         # 'Z eigenvalues': f'Z_{colname_suffix}',
-        'Q eigenvalues': f'Q_{colname_suffix}',
-        'X singular values': f'X_{colname_suffix}',
+        '$Q_t$ eigenvalues': f'Q_{colname_suffix}',
+        '$X_t$ singular values': f'X_{colname_suffix}',
         # 'X max singular value': f'X_max_singval',
     }
 
-    fig, axes = plt.subplots(1, len(title2col), figsize=(15, 4))
+    fig, axes = plt.subplots(1, len(title2col), figsize=(12, 4))
 
     def update(frame):
         for ax, (title, col) in zip(axes, title2col.items()):
             if pd.api.types.is_numeric_dtype(df[col]):
                 ax.plot(df.loc[:frame, col], marker='o')
-                ax.set_title(title)
-                ax.set_xlabel('Step (t)')
-                ax.set_yscale(yscale, **yscale_kw)
             else:
                 vals = df.loc[frame, col]
-                ax.plot(init_spectrum, vals, label=f'Step {frame}')
-                ax.set_title(f'{title} (Steps 0 – {frame})')
-                ax.set_xlabel('X_0 singular values')
-                ax.set_yscale(yscale, **yscale_kw)
-                ax.legend(loc='upper right', fontsize='small')
+                ax.plot(init_spectrum, vals, label=str(frame))
                 current_lower, current_upper = ax.get_ylim()
                 ax.set_ylim(
                     min(current_lower, float(vals.min())/1.1, 0),
                     max(current_upper, float(vals.max())*1.1, 1)
                 )
-
+            ax.set_title(title)
+            ax.set_xlabel('$X_0$ singular values')
+            ax.set_yscale(yscale, **yscale_kw)
+        n_items = len(axes[2].get_legend_handles_labels()[0])
+        axes[2].legend(loc='upper left', bbox_to_anchor=(1.0, 1.0), fontsize='small', title='Step ($t$)', ncol=1 + (n_items - 1) // 6)
     ani = FuncAnimation(fig, update, frames=frames, init_func=lambda: None, interval=500, repeat=False)
     plt.close(fig)
     return ani
