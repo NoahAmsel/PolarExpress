@@ -8,6 +8,18 @@ import pandas as pd
 import torch
 
 
+def rescale_PE_below_1(coeffs):
+    scaled_coeffs = []
+    max_val = 1
+    for a, b, c in coeffs:
+        a *= max_val
+        b *= max_val**3
+        c *= max_val**5
+        max_val = a + b + c
+        scaled_coeffs.append((a / max_val, b / max_val, c / max_val))
+    return scaled_coeffs
+
+
 class PolarExpressDiagnostic:
 
     def __init__(
@@ -19,6 +31,7 @@ class PolarExpressDiagnostic:
         force_symmetry: bool = True,  # Our CUDA kernels actually do enforce symmetry.
         xxt_dtype=None,
         xxt_posthoc_dtype=None,
+        post_restart_ambient_dtype=None,
         qT_posthoc_dtype=None,
         qx_dtype=None,
         do_diagnostics=True,
@@ -27,6 +40,7 @@ class PolarExpressDiagnostic:
             ns3=[(1.5, -0.5)],
             ns5=[((15/8) / 1.02, (-10/8) / (1.02**3), (3/8) / (1.02**5))],
             polar5=self.PE_coeffs_list,
+            rescaled_polar5=self.rescaled_polar5,
         )[coeffs_name]
         self.coeffs = self.coeffs[:steps] + list( 
             repeat(self.coeffs[-1], steps - len(self.coeffs)))
@@ -39,6 +53,7 @@ class PolarExpressDiagnostic:
         self.mm_dtype = ambient_dtype
         self.xxt_dtype = self.mm_dtype if xxt_dtype is None else xxt_dtype
         self.xxt_posthoc_dtype = self.ambient_dtype if xxt_posthoc_dtype is None else xxt_posthoc_dtype
+        self.post_restart_ambient_dtype = self.ambient_dtype if post_restart_ambient_dtype is None else post_restart_ambient_dtype
         self.qx_dtype = self.mm_dtype if qx_dtype is None else qx_dtype
         self.qT_posthoc_dtype = self.ambient_dtype if qT_posthoc_dtype is None else qT_posthoc_dtype
 
@@ -58,14 +73,16 @@ class PolarExpressDiagnostic:
         X = X.to(self.ambient_dtype)
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
-                if (iter in self.restarts) and (iter > 0):
-                    X = self.mm(Q, X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
+                if iter > 0:
+                    X = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
+                    true_ambient_dtype = self.ambient_dtype  # stashing this to restore it later
+                    self.ambient_dtype = self.post_restart_ambient_dtype
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
                 R = self.sym_mm(X, X.mT, dtype=self.xxt_dtype).to(dtype=self.xxt_posthoc_dtype).to(dtype=self.ambient_dtype)  # R = X @ X.mT
                 # TODO: record eigenvectors of XXT at iter 0 to use for diagonalizing inside diagnostics
             Z = self.sym_polynomial(R, coeff)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
-                X_if_we_stopped_here = self.mm(Q, X, dtype=self.qx_dtype)
+                X_if_we_stopped_here = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)
                 diagnostics.append(
                     {
                         f"{name}_{k}": v
@@ -76,10 +93,11 @@ class PolarExpressDiagnostic:
                         for k, v in self.diagnostics(X_if_we_stopped_here, starting_left_svs, starting_right_svs).items()
                     } | self.polar_accuracy_metrics(Xorig, X_if_we_stopped_here)
                 )
-            Q = self.mm(Q, Z)  # Q = Q Z
+            Q = self.sym_mm(Q, Z)  # Q = Q Z
             R = self.sym_mm(Z.T, self.sym_mm(R, Z))  # R = Z.T @ R @ Z
         Q = Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype)
         X = self.mm(Q, X, dtype=self.qx_dtype)
+        self.ambient_dtype = true_ambient_dtype
         if self.do_diagnostics:
             diagnostics.append(
                 {
@@ -93,13 +111,17 @@ class PolarExpressDiagnostic:
             )
         return X, pd.DataFrame(diagnostics)
 
-    def track_eigvals(self, eigvals):
+    def track_eigvals(self, x_eigvals, r_shift):
         rs = []
         qs = []
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
-                q = torch.ones_like(eigvals)
-                r = eigvals.clone()
+                if iter == 0:
+                    r = x_eigvals**2
+                else:
+                    x_eigvals = q * x_eigvals
+                    r = x_eigvals**2 - r_shift
+                q = torch.ones_like(x_eigvals)
             z = coeff[-1] * torch.ones_like(r)
             for c in reversed(coeff[:-1]):
                 z = c + r * z
@@ -192,10 +214,14 @@ class PolarExpressDiagnostic:
         (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
         (1.875, -1.25, 0.375),  # subsequent coeffs equal this numerically
     ]
+    rescaled_polar5 = rescale_PE_below_1(PE_coeffs_list)
     # safety factor for numerical stability (but exclude last polynomial)
     PE_coeffs_list = [
         (a / 1.02, b / 1.02**3, c / 1.02**5) for (a, b, c) in PE_coeffs_list[:-1]
     ] + [PE_coeffs_list[-1]]
+    rescaled_polar5 = [
+        (a / 1.02, b / 1.02**3, c / 1.02**5) for (a, b, c) in rescaled_polar5[:-1]
+    ] + [rescaled_polar5[-1]]
 
 
 def spectrum2matrix(spectrum, aspect_ratio):
