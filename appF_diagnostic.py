@@ -65,6 +65,7 @@ class PolarExpressDiagnostic:
         return self.appF(G)
 
     def appF(self, X: torch.Tensor) -> torch.Tensor:
+        true_ambient_dtype = self.ambient_dtype  # stashing this to restore it later in case we use post_restart_ambient_dtype
         diagnostics = []
         if self.do_diagnostics:
             Xorig = X.clone()
@@ -75,7 +76,6 @@ class PolarExpressDiagnostic:
             if (iter == 0) or (iter in self.restarts):
                 if iter > 0:
                     X = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
-                    true_ambient_dtype = self.ambient_dtype  # stashing this to restore it later
                     self.ambient_dtype = self.post_restart_ambient_dtype
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
                 R = self.sym_mm(X, X.mT, dtype=self.xxt_dtype).to(dtype=self.xxt_posthoc_dtype).to(dtype=self.ambient_dtype)  # R = X @ X.mT
@@ -129,7 +129,7 @@ class PolarExpressDiagnostic:
             q *= z
             r *= z**2
         rs.append(r.clone().cpu().numpy()); qs.append(q.clone().cpu().numpy())
-        return rs, qs
+        return dict(R=rs, Q=qs)
 
     def mm(self, A, B, symmetrize=False, dtype=None):
         if dtype is None: dtype = self.mm_dtype
@@ -240,7 +240,7 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
     df['Q_singvals'] = df['Q_singvals'].apply(np.sort)
 
     colname_suffix = "singvals_from_starting_vecs"
-    # colname_suffix = "singvals"  # ONLY use this when the underlying polynomials are monotonic, like newton schulz. Otherwise the eigenvalues won't match those of X.
+    # colname_suffix = "singvals"  # ONLY use this when the underlying polynomials are monotonic, like newton schulz, and there is no blowup that causes non-monotonicity. Otherwise the eigenvalues won't match those of X.
     title2col = {
         'R eigenvalues': f'R_{colname_suffix}',
         # 'Z eigenvalues': f'Z_{colname_suffix}',
