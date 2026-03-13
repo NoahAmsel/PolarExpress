@@ -251,6 +251,13 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
 
     fig, axes = plt.subplots(1, len(title2col), figsize=(12, 4))
 
+    def init_func():
+        for ax in axes:
+            ax.clear()
+            ax.set_xlabel('$X_0$ singular values')
+            ax.set_yscale(yscale, **yscale_kw)
+        return axes
+
     def update(frame):
         for ax, (title, col) in zip(axes, title2col.items()):
             if pd.api.types.is_numeric_dtype(df[col]):
@@ -268,7 +275,7 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
             ax.set_yscale(yscale, **yscale_kw)
         n_items = len(axes[2].get_legend_handles_labels()[0])
         axes[2].legend(loc='upper left', bbox_to_anchor=(1.0, 1.0), fontsize='small', title='Step ($t$)', ncol=1 + (n_items - 1) // 6)
-    ani = FuncAnimation(fig, update, frames=frames, init_func=lambda: None, interval=500, repeat=False)
+    ani = FuncAnimation(fig, update, frames=frames, init_func=init_func, interval=500, repeat=False)
     plt.close(fig)
     return ani
 
