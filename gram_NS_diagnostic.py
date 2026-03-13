@@ -41,6 +41,14 @@ class PolarExpressDiagnostic:
             ns5=[((15/8) / 1.02, (-10/8) / (1.02**3), (3/8) / (1.02**5))],
             polar5=self.PE_coeffs_list,
             rescaled_polar5=self.rescaled_polar5,
+            jordan=[(3.4445, -4.775, 2.0315)],
+            you = [
+                (4.0848, -6.8946, 2.9270),
+                (3.9505, -6.3029, 2.6377),
+                (3.7418, -5.5913, 2.3037),
+                (2.8769, -3.1427, 1.2046),
+                (2.8366, -3.0525, 1.2012),
+            ]
         )[coeffs_name]
         self.coeffs = self.coeffs[:steps] + list( 
             repeat(self.coeffs[-1], steps - len(self.coeffs)))
@@ -112,15 +120,16 @@ class PolarExpressDiagnostic:
         return X, pd.DataFrame(diagnostics)
 
     def track_eigvals(self, x_eigvals, r_shift):
+        assert r_shift <= 0, "Don't forget to provide a *negative* r_shift"
         rs = []
         qs = []
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if iter == 0:
-                    r = x_eigvals**2 - r_shift
+                    r = x_eigvals**2 + r_shift
                 else:
                     x_eigvals = q * x_eigvals
-                    r = x_eigvals**2 - r_shift
+                    r = x_eigvals**2 + r_shift
                 q = torch.ones_like(x_eigvals)
             z = coeff[-1] * torch.ones_like(r)
             for c in reversed(coeff[:-1]):

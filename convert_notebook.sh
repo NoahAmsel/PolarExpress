@@ -1,0 +1,1 @@
+jupyter nbconvert --to html --execute --no-input gram_newton_schulz_stability.ipynb
