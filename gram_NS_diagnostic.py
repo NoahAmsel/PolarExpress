@@ -117,7 +117,7 @@ class PolarExpressDiagnostic:
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if iter == 0:
-                    r = x_eigvals**2
+                    r = x_eigvals**2 - r_shift
                 else:
                     x_eigvals = q * x_eigvals
                     r = x_eigvals**2 - r_shift
