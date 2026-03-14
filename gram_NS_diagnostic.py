@@ -233,10 +233,13 @@ class PolarExpressDiagnostic:
     ] + [rescaled_polar5[-1]]
 
 
-def spectrum2matrix(spectrum, aspect_ratio):
+def spectrum2matrix(spectrum, aspect_ratio, seed=None):
     n = int(len(spectrum) * aspect_ratio)
     m = len(spectrum)
-    U, _, Vh = torch.linalg.svd(torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype), full_matrices=False)
+    gen = torch.Generator(device=spectrum.device)
+    if seed is not None: gen.manual_seed(seed)
+    randn = torch.randn(m, n, device=spectrum.device, dtype=spectrum.dtype, generator=gen)
+    U, _, Vh = torch.linalg.svd(randn, full_matrices=False)
     return U @ torch.diag(spectrum) @ Vh
 
 
@@ -287,6 +290,38 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
     ani = FuncAnimation(fig, update, frames=frames, init_func=init_func, interval=500, repeat=False)
     plt.close(fig)
     return ani
+
+
+def eigdrift_figure(diagnostic_results, exact_tracking_results, outname):
+        fig, axes = plt.subplots(1, 4, figsize=(12, 4))
+
+        diag_axis = axes[0]
+        for m in ("R", "Q", "X"):
+            diag_axis.plot(diagnostic_results[f"{m}_diagonalizability"], label=f"${m}_t$", marker='o')
+        diag_axis.legend()
+        diag_axis.set_xlabel("Step ($t$)")
+        diag_axis.set_ylabel("Relative\nDiagonalization Error")
+        diag_axis.set_ylim(top=max(0.2, diag_axis.get_ylim()[1]))
+
+        for ax, m, c in zip(axes[1:], ("R", "Q", "X"), ("C0", "C1", "C2")):
+            # Frob norm: ax.plot([np.linalg.norm(spectrum) for spectrum in diagnostic_results['X_singvals']], label="Observed", marker='o', color='purple')
+            ax.plot(diagnostic_results[f"{m}_max_singval"], label="Observed", marker='o', color=c)
+            if m == "X":
+                ax.axhline(1, label="Theoretical", color='black', linestyle='--')
+                theoretical_max = 1
+            else:
+                ax.plot([spectrum.max() for spectrum in exact_tracking_results[m]], label="Theoretical", color='black', linestyle='--')
+                theoretical_max = max(spectrum.max() for spectrum in exact_tracking_results[m])
+            ax.legend()
+            ax.set_xlabel("Step ($t$)")
+            ax.set_ylabel(f"Max Eigenvalue")
+            ax.set_title(f"${m}_t$")
+            ax.set_ylim(top=min(theoretical_max * 5, 1.5 * ax.get_ylim()[1]))
+
+        fig.savefig(outname, format="svg", bbox_inches="tight")
+        plt.close(fig)
+
+        return fig
 
 
 if __name__ == "__main__":
