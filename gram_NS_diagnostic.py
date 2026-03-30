@@ -74,7 +74,7 @@ class PolarExpressDiagnostic:
 
     def appF(self, X: torch.Tensor) -> torch.Tensor:
         true_ambient_dtype = self.ambient_dtype  # stashing this to restore it later in case we use post_restart_ambient_dtype
-        diagnostics = []
+        diagnostics = {}
         if self.do_diagnostics:
             Xorig = X.clone()
             starting_left_svs, _, starting_right_svs = torch.linalg.svd(Xorig, full_matrices=False)
@@ -83,6 +83,18 @@ class PolarExpressDiagnostic:
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if iter > 0:
+                    if self.do_diagnostics:
+                        X_if_we_stopped_here = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)
+                        diagnostics[iter-0.5] = (
+                            {
+                                f"{name}_{k}": v
+                                for name, M in (("Q", Q),)
+                                for k, v in self.diagnostics(M, starting_left_svs, symmetric=True).items()
+                            } | {
+                                f"X_{k}": v
+                                for k, v in self.diagnostics(X_if_we_stopped_here, starting_left_svs, starting_right_svs).items()
+                            } | self.polar_accuracy_metrics(Xorig, X_if_we_stopped_here)
+                        )
                     X = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)  # apply the current Q to X before restarting
                     self.ambient_dtype = self.post_restart_ambient_dtype
                 Q = torch.eye(X.shape[-2], device=X.device, dtype=X.dtype)
@@ -91,7 +103,7 @@ class PolarExpressDiagnostic:
             Z = self.sym_polynomial(R, coeff)  # Z = aI + bR + cR^2
             if self.do_diagnostics:
                 X_if_we_stopped_here = self.mm(Q.to(dtype=self.qT_posthoc_dtype).to(dtype=self.ambient_dtype), X, dtype=self.qx_dtype)
-                diagnostics.append(
+                diagnostics[iter] = (
                     {
                         f"{name}_{k}": v
                         for name, M in (("R", R), ("Z", Z), ("Q", Q),)
@@ -107,7 +119,7 @@ class PolarExpressDiagnostic:
         X = self.mm(Q, X, dtype=self.qx_dtype)
         self.ambient_dtype = true_ambient_dtype
         if self.do_diagnostics:
-            diagnostics.append(
+            diagnostics[len(self.coeffs)] = (
                 {
                     f"{name}_{k}": v
                     for name, M in (("R", R), ("Z", Z), ("Q", Q),)  # R doesn't matter and Z hasn't changed but whatever
@@ -117,27 +129,28 @@ class PolarExpressDiagnostic:
                     for k, v in self.diagnostics(X, starting_left_svs, starting_right_svs).items()
                 } | self.polar_accuracy_metrics(Xorig, X)
             )
-        return X, pd.DataFrame(diagnostics)
+        return X, pd.DataFrame.from_dict(diagnostics, orient='index').sort_index()
 
     def track_eigvals(self, x_eigvals, r_shift):
         assert r_shift <= 0, "Don't forget to provide a *negative* r_shift"
-        rs = []
-        qs = []
+        rs = {}
+        qs = {}
         for iter, coeff in enumerate(self.coeffs):
             if (iter == 0) or (iter in self.restarts):
                 if iter == 0:
                     r = x_eigvals**2 + r_shift
                 else:
+                    qs[iter-0.5] = q.clone().cpu().numpy()
                     x_eigvals = q * x_eigvals
                     r = x_eigvals**2 + r_shift
                 q = torch.ones_like(x_eigvals)
             z = coeff[-1] * torch.ones_like(r)
             for c in reversed(coeff[:-1]):
                 z = c + r * z
-            rs.append(r.clone().clone().cpu().numpy()); qs.append(q.clone().cpu().numpy())
+            rs[iter] = r.clone().clone().cpu().numpy(); qs[iter] = q.clone().cpu().numpy()
             q *= z
             r *= z**2
-        rs.append(r.clone().cpu().numpy()); qs.append(q.clone().cpu().numpy())
+        rs[len(self.coeffs)] = r.clone().cpu().numpy(); qs[len(self.coeffs)] = q.clone().cpu().numpy()
         return dict(R=rs, Q=qs)
 
     def mm(self, A, B, symmetrize=False, dtype=None):
@@ -243,13 +256,17 @@ def spectrum2matrix(spectrum, aspect_ratio, seed=None):
     return U @ torch.diag(spectrum) @ Vh
 
 
+def is_scalar_nan(x):
+    return np.ndim(x) == 0 and isinstance(x, (float, np.floating)) and np.isnan(x)
+
+
 def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
     init_spectrum = df.loc[0, 'X_singvals_from_starting_vecs']
-    if frames is None: frames = df.index.tolist()
+    if frames is None: frames = sorted(df.index.tolist())
 
     # since Z and Q are decreasing functions of the corresponding singular value of X_0, flip them for plotting purposes
-    df['Z_singvals'] = df['Z_singvals'].apply(np.sort)
-    df['Q_singvals'] = df['Q_singvals'].apply(np.sort)
+    df['Z_singvals'] = df['Z_singvals'].apply(lambda x: np.sort(x) if not is_scalar_nan(x) else x)
+    df['Q_singvals'] = df['Q_singvals'].apply(lambda x: np.sort(x) if not is_scalar_nan(x) else x)
 
     colname_suffix = "singvals_from_starting_vecs"
     # colname_suffix = "singvals"  # ONLY use this when the underlying polynomials are monotonic, like newton schulz, and there is no blowup that causes non-monotonicity. Otherwise the eigenvalues won't match those of X.
@@ -272,7 +289,9 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
 
     def update(frame):
         for ax, (title, col) in zip(axes, title2col.items()):
-            if pd.api.types.is_numeric_dtype(df[col]):
+            if is_scalar_nan(df.loc[frame, col]):
+                ax.plot([np.nan], [np.nan])  # dummy
+            elif pd.api.types.is_numeric_dtype(df[col]):
                 ax.plot(df.loc[:frame, col], marker='o')
             else:
                 vals = df.loc[frame, col]
@@ -310,64 +329,16 @@ def eigdrift_figure(diagnostic_results, exact_tracking_results, outname):
                 ax.axhline(1, label="Theoretical", color='black', linestyle='--')
                 theoretical_max = 1
             else:
-                ax.plot([spectrum.max() for spectrum in exact_tracking_results[m]], label="Theoretical", color='black', linestyle='--')
-                theoretical_max = max(spectrum.max() for spectrum in exact_tracking_results[m])
+                iter_series, max_eig_series = zip(*((k, v.max()) for k, v in exact_tracking_results[m].items()))
+                ax.plot(iter_series, max_eig_series, label="Theoretical", color='black', linestyle='--')
+                theoretical_max = max(max_eig_series)
             ax.legend()
             ax.set_xlabel("Step ($t$)")
             ax.set_ylabel(f"Max Eigenvalue")
             ax.set_title(f"${m}_t$")
-            ax.set_ylim(top=min(theoretical_max * 5, 1.5 * ax.get_ylim()[1]))
+            ax.set_ylim(top=min(theoretical_max * 5, 1.5 * ax.get_ylim()[1]), bottom=max(ax.get_ylim()[0], -1))
 
         fig.savefig(outname, format="svg", bbox_inches="tight")
         plt.close(fig)
 
         return fig
-
-
-if __name__ == "__main__":
-    n = 512
-    # aspect_ratio = 4
-    # spectrum = torch.cat((
-    #     torch.logspace(0, -2, steps=n//2, dtype=torch.float64),
-    #     torch.zeros(n - n//2, dtype=torch.float64),
-    # ))
-    # G = spectrum2matrix(spectrum, aspect_ratio)
-
-    G = torch.diag(torch.logspace(-.1, -8, steps=n, dtype=torch.float64))
-
-
-    PE = PolarExpressDiagnostic(coeffs_name='ns3', steps=5, restarts=[], sym_mm_name='avg')
-    _, diagnostics = PE(G)
-    df = pd.DataFrame(diagnostics)
-    print(df.head())
-
-
-# NOTE TO SELF:
-# I tried to show that loss of precision could also be due to eigenvalue drift, but I didn't succeed.
-# The only way I could get significant eigenvalue drift was when there were large negative eigenvalues.
-if False:
-    # ### Eigenvector Drift
-    # Even in the absence of spurious negative eigenvalues, the algorithm may still be unstable due to eigenvector drift.
-    # So far, we have analyzed Gram Newton Schulz solely in terms of its effect on the eigenvalues of the matrices.
-    # This is because, in exact arithmetic, the eigenvectors of any $R_t, Q_t$ or $Z_t$ are all identical — they are the left singular vectors of the input $G$.
-    # Let $G = U \\Sigma V^\top$ be the singular value decomposition, and then $Q_T = U \Lambda_T U^\top$, where $\lim_{T \to \infty} \Lambda_T = \\Sigma^{-1}$.
-    # Therefore, when we multiply $Q_T G$ in the final step, we expect $U^\top U$ to cancel, leaving
-    # $$Q_T \cdot G = U\Lambda_T U^\top \cdot U \\Sigma V^\top = U \Lambda_T \\Sigma V^\top \to U \\Sigma^{-1} \\Sigma V^\top = U V^\top =: \mathrm{polar}(G)$$
-    # as desired.
-    # However, in floating point arithmetic, the eigenvectors of $Q_T$ will not match $U$, since each matrix operation performed by the algorithm causes the eigenvectors to drift slightly.
-    # To demonstrate this drift, we can measure how far $Q_T$ is from the nearest matrix of the form $UDU^\top$ for some diagonal matrix $D$.
-
-    _, well_conditioned_diagnostics = PolarExpressDiagnostic(
-        coeffs_name="ns5",
-        steps=30,
-        ambient_dtype=torch.float16,
-        xxt_dtype=torch.float64,
-    )(spectrum2matrix(torch.logspace(-0.01, -3, steps=n, dtype=torch.float64, device=DEVICE), aspect_ratio))
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    for col, title in zip(['Q_diagonalizability'], ['Q_t']):
-        ax.plot(well_conditioned_diagnostics[col], marker='o')
-        ax.set_xlabel('Step (t)')
-    ax.set_title("Relative distance from\nQ_t to nearest UDU^T");
-
-    HTML(spectrum_evolution_plot(well_conditioned_diagnostics, frames=list(range(0, 30, 5))).to_jshtml())
