@@ -94,9 +94,8 @@ python examples/convergence_test.py
 # and plot its convergence, saved to figures/
 python examples/generate_coefficients.py
 
-# Interactive polynomial composition visualizer (open in a browser)
-open examples/Visualize.html   # macOS
-xdg-open examples/Visualize.html  # Linux
+# Polynomial composition visualizer (Jupyter notebook)
+jupyter notebook plotsforpolar.ipynb
 ```
 
 ## Reproducing the paper experiments
