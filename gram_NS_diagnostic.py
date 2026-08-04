@@ -308,6 +308,15 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
         axes[2].legend(loc='upper left', bbox_to_anchor=(1.0, 1.0), fontsize='small', title='Step ($t$)', ncol=1 + (n_items - 1) // 6)
     ani = FuncAnimation(fig, update, frames=frames, init_func=init_func, interval=500, repeat=False)
     plt.close(fig)
+
+    def draw_all_frames():
+        """Redraw every frame in order and return the figure showing the final frame."""
+        init_func()
+        for frame in frames:
+            update(frame)
+        return fig
+    ani.draw_all_frames = draw_all_frames
+
     return ani
 
 
@@ -338,7 +347,7 @@ def eigdrift_figure(diagnostic_results, exact_tracking_results, outname):
             ax.set_title(f"${m}_t$")
             ax.set_ylim(top=min(theoretical_max * 5, 1.5 * ax.get_ylim()[1]), bottom=max(ax.get_ylim()[0], -1))
 
-        fig.savefig(outname, format="svg", bbox_inches="tight")
+        fig.savefig(outname, bbox_inches="tight")
         plt.close(fig)
 
         return fig
