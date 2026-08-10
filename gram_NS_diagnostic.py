@@ -278,7 +278,7 @@ def spectrum_evolution_plot(df, yscale='linear', frames=None, yscale_kw={}):
         # 'X max singular value': f'X_max_singval',
     }
 
-    fig, axes = plt.subplots(1, len(title2col), figsize=(12, 4))
+    fig, axes = plt.subplots(1, len(title2col), figsize=(12, 3))
 
     def init_func():
         for ax in axes:
