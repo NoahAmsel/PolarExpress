@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polar-express"
+version = "0.1.0"
+description = "Optimal polynomial methods for matrix polar decomposition (arXiv:2505.16932)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+keywords = ["polar decomposition", "matrix sign function", "deep learning", "Muon optimizer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# numpy is the only hard dependency; torch is optional
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# Needed for PolarExpress
+torch = ["torch>=2.0"]
+# Needed for examples/convergence_test.py
+examples = ["matplotlib>=3.7"]
+# Everything
+all = ["polar-express[torch,examples]"]
+
+[project.urls]
+Homepage    = "https://github.com/rg-code/PolarExpress"
+Paper       = "https://arxiv.org/abs/2505.16932"
+
+[tool.setuptools.packages.find]
+# Auto-discover the polar_express/ package; exclude tests, examples, etc.
+where     = ["."]
+include   = ["polar_express*"]
+exclude   = ["examples*", "tests*"]
+
+[tool.setuptools.package-data]
+# Nothing extra needed; .py files are included automatically
+polar_express = []
