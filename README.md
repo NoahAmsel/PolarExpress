@@ -28,7 +28,7 @@ python examples/convergence_test.py
 ```
 
 ## Quick start
-`PolarExpress` approximates the **polar factor** of a matrix. If $G = U \Sigma V^T$ is the (reduced) singular value decomposition of $G$, then its polar factor is $\operatorname{polar}(G) = UV^T$.
+`PolarExpress` approximates the **polar factor** of a matrix. If $G = U \Sigma V^T$ is the (reduced) singular value decomposition of $G$, then its polar factor is $\text{polar}(G) = UV^T$.
 
 ```python
 import torch
