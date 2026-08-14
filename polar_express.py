@@ -2,6 +2,7 @@ from itertools import repeat
 from math import inf, sqrt
 
 import numpy as np
+from numpy.polynomial import Polynomial
 import torch
 
 
@@ -46,32 +47,37 @@ def optimal_quintic(l, u):
                         sqrt(9*b**2 - 20*a*c)) / (10*c))
     return float(a), float(b), float(c)
 
+degree_to_remez = {3: optimal_cubic, 5: optimal_quintic}
 
-def optimal_composition(l, num_iters, safety_factor_eps=0, cushion=0):
+def optimal_composition(l, num_iters, degree=5, safety_factor_eps=0, cushion=0):
     u = 1
     assert 0 <= l <= u
+    if not degree in degree_to_remez:
+        raise ValueError(f"Degree {degree} not supported. Must be one of {list(degree_to_remez.keys())}.")
     safety_factor = 1 + safety_factor_eps
     coefficients = []
     for iter in range(num_iters):
-        a, b, c = optimal_quintic(max(l, cushion*u), u)
+        optimal_coeffs = degree_to_remez[degree](max(l, cushion*u), u)
+        # p(x) = x*h(x^2) where coefficients of h are given by optimal_coeffs
+        p = Polynomial.identity() * Polynomial(optimal_coeffs)(Polynomial.identity()**2)
         if cushion*u > l:
             # Due to cushioning, this may be centered around 1 with 
             # respect to 0.024*u, u. Recenter it around 1 with respect 
-            # to l, u, meaning find c so that 1 - c*p(l) = c*p(u) - 1:
-            pl = a*l + b*l**3 + c*l**5
-            pu = a*u + b*u**3 + c*u**5
-            rescaler = 2/(pl + pu)
-            a *= rescaler; b *= rescaler; c *= rescaler
+            # to l, u, meaning find c so that 1 - c*p(l) = c*p(u) - 1,
+            # and use c*p(x) instead of p(x) from now on
+            p *= 2/(p(l) + p(u))
         # Optionally incorporate safety factor here:
+        # All singular values must at least lie in [0, u]
+        # safety_factor corrects for minor floating point errors to ensure this 
         if iter < num_iters - 1:  # don't apply to last polynomial
-            a /= safety_factor; b /= safety_factor**3; c /= safety_factor**5
-        coefficients.append((a, b, c))
-        l = a*l + b*l**3 + c*l**5
+            p = p(Polynomial.identity() / safety_factor)
+        coefficients.append(p.coef[1::2])  # extract odd coefficients
+        l = p(l)
         u = 2 - l
     return coefficients
 
 
-coeffs_list = optimal_composition(l=1e-3, num_iters=10, safety_factor_eps=1e-2, cushion=0.02)
+coeffs_list = optimal_composition(l=1e-3, num_iters=10, degree=5, safety_factor_eps=1e-2, cushion=0.02)
 # print("Polar Express Coefficient Series:", *coeffs_list, sep="\n")
 
 
@@ -89,4 +95,3 @@ def PolarExpress(G: torch.Tensor, steps: int) -> torch.Tensor:
         X = a * X + B @ X  # X <- aX + bX^3 + cX^5
     if G.size(-2) > G.size(-1): X = X.mT
     return X
-
