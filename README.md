@@ -5,7 +5,7 @@ This repo implements the PolarExpress method from the paper
 
 To use it, simply copy the file `polar_express.py` into your project. Requires `numpy` and `torch`.
 
-You may also be interested in [`gram-newton-schulz`](#kernel-optimized-implementation).
+You may also be interested in [`gram-newton-schulz`](https://github.com/Dao-AILab/gram-newton-schulz).
 
 ## Quick start
 `PolarExpress` approximates the **polar factor** of a matrix. If $G = U \Sigma V^T$ is the (reduced) singular value decomposition of $G$, then its polar factor is $\text{polar}(G) = UV^T$.
